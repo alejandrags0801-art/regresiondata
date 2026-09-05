@@ -1,18 +1,220 @@
 """Aplicación Streamlit: análisis de regresión lineal simple y múltiple.
 
+Archivo autocontenido (no requiere módulos adicionales del proyecto).
+
 Ejecutar con:  streamlit run app.py
 """
 
+from __future__ import annotations
+
+import numpy as np
 import pandas as pd
 import streamlit as st
-
-import utils
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
 st.set_page_config(
     page_title="Análisis de Regresión Lineal",
     page_icon="📈",
     layout="wide",
 )
+
+
+# =========================================================================== #
+# Funciones auxiliares
+# =========================================================================== #
+
+def cargar_datos(archivo) -> pd.DataFrame:
+    """Carga un archivo CSV o Excel subido por el usuario.
+
+    Para CSV intenta varios separadores (``;``, ``,``, tabulador) y
+    codificaciones comunes, de modo que funcionen archivos generados en
+    español (por ejemplo con ``;`` y coma decimal).
+    """
+    nombre = (getattr(archivo, "name", "") or "").lower()
+
+    if nombre.endswith((".xlsx", ".xls")):
+        return pd.read_excel(archivo)
+
+    for sep in (";", ",", "\t"):
+        for encoding in ("utf-8", "latin-1"):
+            try:
+                archivo.seek(0)
+                df = pd.read_csv(archivo, sep=sep, decimal=",", encoding=encoding)
+                if df.shape[1] > 1:
+                    return df
+            except Exception:  # noqa: BLE001 - se prueba la siguiente combinación
+                continue
+
+    # Último intento con la configuración por defecto de pandas
+    archivo.seek(0)
+    return pd.read_csv(archivo)
+
+
+def preparar_datos(df: pd.DataFrame, target: str, features: list[str], dropna: bool = True):
+    """Prepara la matriz de predictores X y el vector objetivo y.
+
+    - Codifica automáticamente (one-hot) las variables categóricas elegidas.
+    - Elimina filas con valores faltantes en las columnas usadas (si dropna=True).
+
+    Devuelve ``(X, y, nombres)`` donde ``nombres`` son los predictores
+    finales (incluye las columnas generadas por la codificación).
+    """
+    if target not in df.columns:
+        raise ValueError(f"La variable objetivo '{target}' no existe en los datos.")
+    faltantes = [f for f in features if f not in df.columns]
+    if faltantes:
+        raise ValueError("Variables no encontradas: " + ", ".join(faltantes))
+
+    datos = df[[target] + list(features)].copy()
+
+    if dropna:
+        datos = datos.dropna()
+
+    y = datos[target]
+
+    categoricas = [c for c in features if not pd.api.types.is_numeric_dtype(datos[c])]
+    numericas = [c for c in features if c not in categoricas]
+
+    if numericas:
+        X = datos[numericas].copy()
+    else:
+        X = pd.DataFrame(index=datos.index)
+
+    if categoricas:
+        dummies = pd.get_dummies(datos[categoricas], prefix=categoricas)
+        X = pd.concat([X, dummies], axis=1)
+
+    return X, y, list(X.columns)
+
+
+def entrenar_modelo(X, y, test_size: float = 0.2, random_state: int = 42):
+    """Divide los datos y ajusta una regresión lineal (scikit-learn)."""
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=random_state
+    )
+    modelo = LinearRegression()
+    modelo.fit(X_train, y_train)
+    return {
+        "modelo": modelo,
+        "X_train": X_train,
+        "X_test": X_test,
+        "y_train": y_train,
+        "y_test": y_test,
+    }
+
+
+def calcular_metricas(y_real, y_pred, n_predictores: int) -> dict:
+    """Calcula R², R² ajustado, RMSE, MAE y MSE."""
+    y_real = np.asarray(y_real)
+    y_pred = np.asarray(y_pred)
+    n = len(y_real)
+    r2 = r2_score(y_real, y_pred)
+    mse = mean_squared_error(y_real, y_pred)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(y_real, y_pred)
+
+    if n - n_predictores - 1 > 0:
+        r2_ajustado = 1 - (1 - r2) * (n - 1) / (n - n_predictores - 1)
+    else:
+        r2_ajustado = float("nan")
+
+    return {"R²": r2, "R² ajustado": r2_ajustado, "RMSE": rmse, "MAE": mae, "MSE": mse}
+
+
+def grafico_regresion_simple(X, y, nombre_feature: str):
+    """Dispersión con recta de regresión y banda de confianza (regresión simple)."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.regplot(
+        x=X[nombre_feature],
+        y=y,
+        ax=ax,
+        scatter_kws={"s": 40, "alpha": 0.7},
+        line_kws={"color": "#d62728", "lw": 2},
+        errorbar=("ci", 95),
+    )
+    ax.set_xlabel(nombre_feature)
+    ax.set_ylabel("Variable dependiente (Y)")
+    ax.set_title(f"Regresión lineal: Y vs {nombre_feature}")
+    fig.tight_layout()
+    return fig
+
+
+def grafico_matriz_dispersion(X, y, nombres: list[str], max_vars: int = 6):
+    """Cuadrícula de dispersión de cada predictor contra la variable dependiente."""
+    mostrar = nombres[:max_vars]
+    n = len(mostrar)
+    filas = int(np.ceil(n / 2))
+    fig, axes = plt.subplots(filas, 2, figsize=(11, 3.6 * filas), squeeze=False)
+    for i, nombre in enumerate(mostrar):
+        ax = axes[i // 2][i % 2]
+        sns.regplot(
+            x=X[nombre],
+            y=y,
+            ax=ax,
+            scatter_kws={"s": 30, "alpha": 0.6},
+            line_kws={"color": "#d62728", "lw": 1.8},
+            ci=None,
+        )
+        ax.set_title(f"Y vs {nombre}", fontsize=10)
+    for j in range(n, filas * 2):
+        axes[j // 2][j % 2].axis("off")
+    fig.tight_layout()
+    return fig
+
+
+def grafico_actual_vs_predicho(y_real, y_pred):
+    """Dispersión de valores reales contra predichos con la línea ideal."""
+    fig, ax = plt.subplots(figsize=(6.5, 5.5))
+    ax.scatter(y_real, y_pred, alpha=0.65, s=45, color="#4c72b0", label="Observaciones")
+    limite = (min(y_real.min(), y_pred.min()), max(y_real.max(), y_pred.max()))
+    ax.plot(limite, limite, color="#d62728", lw=2, ls="--", label="Línea ideal (y = ŷ)")
+    ax.set_xlabel("Valores reales (y)")
+    ax.set_ylabel("Valores predichos (ŷ)")
+    ax.set_title("Predichos vs. reales")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def grafico_residuos(y_real, y_pred):
+    """Residuos vs. predichos e histograma de residuos."""
+    residuos = np.asarray(y_real) - np.asarray(y_pred)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].scatter(y_pred, residuos, alpha=0.6, s=35, color="#4c72b0")
+    axes[0].axhline(0, color="#d62728", lw=1.5, ls="--")
+    axes[0].set_xlabel("Valores predichos (ŷ)")
+    axes[0].set_ylabel("Residuos")
+    axes[0].set_title("Residuos vs. predichos")
+    n_bins = min(20, max(5, int(len(residuos) / 5)))
+    axes[1].hist(residuos, bins=n_bins, color="#4c72b0", edgecolor="white")
+    axes[1].set_xlabel("Residuos")
+    axes[1].set_ylabel("Frecuencia")
+    axes[1].set_title("Histograma de residuos")
+    fig.tight_layout()
+    return fig
+
+
+def grafico_coeficientes(modelo, nombres: list[str]):
+    """Barras horizontales con los coeficientes del modelo."""
+    coefs = np.asarray(modelo.coef_)
+    orden = np.argsort(coefs)
+    colores = ["#4c72b0" if c >= 0 else "#d62728" for c in coefs[orden]]
+    fig, ax = plt.subplots(figsize=(9, max(3.5, 0.4 * len(nombres) + 1.5)))
+    ax.barh(np.asarray(nombres)[orden], coefs[orden], color=colores)
+    ax.axvline(0, color="gray", lw=1)
+    ax.set_xlabel("Coeficiente")
+    ax.set_title("Coeficientes del modelo")
+    fig.tight_layout()
+    return fig
+
+
+# =========================================================================== #
+# Aplicación
+# =========================================================================== #
 
 st.title("📈 Análisis de Regresión Lineal (Simple y Múltiple)")
 st.markdown(
@@ -40,7 +242,7 @@ with st.sidebar:
 df = None
 if archivo is not None:
     try:
-        df = utils.cargar_datos(archivo)
+        df = cargar_datos(archivo)
         st.session_state["df"] = df
     except Exception as exc:  # noqa: BLE001
         st.error(f"No se pudo leer el archivo: {exc}")
@@ -95,7 +297,7 @@ if not features:
 
 # Preparación: codificación one-hot y limpieza de valores faltantes
 try:
-    X, y, nombres = utils.preparar_datos(df, target, features)
+    X, y, nombres = preparar_datos(df, target, features)
 except ValueError as exc:
     st.error(str(exc))
     st.stop()
@@ -138,7 +340,7 @@ test_size = col_c.slider(
 )
 random_state = col_d.number_input("Semilla aleatoria (random_state)", 0, 9999, 42)
 
-resultado = utils.entrenar_modelo(X, y, test_size=test_size, random_state=random_state)
+resultado = entrenar_modelo(X, y, test_size=test_size, random_state=random_state)
 modelo = resultado["modelo"]
 y_test = resultado["y_test"]
 y_pred_test = modelo.predict(resultado["X_test"])
@@ -149,8 +351,8 @@ y_pred_train = modelo.predict(resultado["X_train"])
 # 4. Métricas de desempeño
 # --------------------------------------------------------------------------- #
 st.subheader("📊 Métricas de desempeño (conjunto de prueba)")
-m_test = utils.calcular_metricas(y_test, y_pred_test, len(nombres))
-m_train = utils.calcular_metricas(resultado["y_train"], y_pred_train, len(nombres))
+m_test = calcular_metricas(y_test, y_pred_test, len(nombres))
+m_train = calcular_metricas(resultado["y_train"], y_pred_train, len(nombres))
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("R²", f"{m_test['R²']:.4f}")
@@ -188,20 +390,20 @@ tab_modelo, tab_real, tab_resid, tab_coef = st.tabs(
 
 with tab_modelo:
     if es_simple:
-        fig = utils.grafico_regresion_simple(X, y, nombres[0])
+        fig = grafico_regresion_simple(X, y, nombres[0])
         st.pyplot(fig)
         st.caption("Regresión simple: dispersión con recta de regresión y banda de confianza del 95 %.")
     else:
-        fig = utils.grafico_matriz_dispersion(X, y, nombres)
+        fig = grafico_matriz_dispersion(X, y, nombres)
         st.pyplot(fig)
         st.caption("Regresión múltiple: relación de cada variable independiente con la variable dependiente.")
 
 with tab_real:
-    st.pyplot(utils.grafico_actual_vs_predicho(y_test, y_pred_test))
+    st.pyplot(grafico_actual_vs_predicho(y_test, y_pred_test))
     st.caption("Puntos cercanos a la línea ideal indican un buen ajuste (conjunto de prueba).")
 
 with tab_resid:
-    st.pyplot(utils.grafico_residuos(y_test, y_pred_test))
+    st.pyplot(grafico_residuos(y_test, y_pred_test))
     st.caption("Residuos sin patrones claros y distribuidos alrededor de cero indican un ajuste adecuado.")
 
 with tab_coef:
@@ -209,7 +411,7 @@ with tab_coef:
         pd.DataFrame({"Variable": nombres, "Coeficiente": modelo.coef_}),
         hide_index=True,
     )
-    st.pyplot(utils.grafico_coeficientes(modelo, nombres))
+    st.pyplot(grafico_coeficientes(modelo, nombres))
 
 
 # --------------------------------------------------------------------------- #
