@@ -7,6 +7,9 @@ Ejecutar con:  streamlit run app.py
 
 from __future__ import annotations
 
+from datetime import datetime
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -210,6 +213,200 @@ def grafico_coeficientes(modelo, nombres: list[str]):
     ax.set_title("Coeficientes del modelo")
     fig.tight_layout()
     return fig
+
+
+def generar_reporte_pdf(
+    *,
+    nombre_datos: str,
+    df: pd.DataFrame,
+    target: str,
+    features: list[str],
+    nombres: list[str],
+    es_simple: bool,
+    X,
+    y,
+    modelo,
+    y_test,
+    y_pred_test,
+    m_test: dict,
+    m_train: dict,
+    test_size: float,
+    random_state: int,
+    prediccion: dict | None = None,
+) -> bytes:
+    """Genera un informe PDF con el resumen completo del modelo.
+
+    Incluye datos del análisis, ecuación del modelo, métricas de desempeño,
+    coeficientes, gráficos y (si existe) la última predicción realizada.
+    Los imports de reportlab se hacen aquí dentro para que la app funcione
+    incluso si esa librería no está instalada.
+    """
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        Image,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    estilos = getSampleStyleSheet()
+    estilo_seccion = ParagraphStyle(
+        "Seccion",
+        parent=estilos["Heading2"],
+        fontSize=13,
+        spaceBefore=16,
+        spaceAfter=6,
+        textColor=colors.HexColor("#1f4e79"),
+    )
+    estilo_codigo = ParagraphStyle(
+        "Codigo",
+        parent=estilos["BodyText"],
+        fontName="Courier",
+        fontSize=10,
+        backColor=colors.HexColor("#f2f2f2"),
+        borderPadding=6,
+        spaceBefore=4,
+        spaceAfter=4,
+    )
+    estilo_centrado = ParagraphStyle(
+        "Centrado",
+        parent=estilos["Normal"],
+        alignment=1,  # centro
+        fontSize=10,
+        textColor=colors.grey,
+    )
+
+    def tabla(datos: list, anchos=None, cabecera: bool = True):
+        """Crea una tabla con estilo de la app (cabecera azul)."""
+        t = Table(datos, colWidths=anchos, hAlign="LEFT")
+        estilo = [
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#bbbbbb")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]
+        if cabecera:
+            estilo += [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4c72b0")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#eef2f7")]),
+            ]
+        else:
+            estilo += [
+                ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.white, colors.HexColor("#eef2f7")]),
+            ]
+        t.setStyle(TableStyle(estilo))
+        return t
+
+    def agregar_grafico(story, fig, ancho: float = 16.5 * cm):
+        """Guarda una figura de matplotlib como imagen PNG dentro del PDF."""
+        w, h = fig.get_size_inches()
+        buf = BytesIO()
+        fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        story.append(Image(buf, width=ancho, height=ancho * h / w))
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        rightMargin=1.8 * cm,
+        leftMargin=1.8 * cm,
+        topMargin=1.6 * cm,
+        bottomMargin=1.6 * cm,
+        title="Informe de Regresión Lineal",
+        author="App de Regresión Lineal (Streamlit)",
+    )
+    story = []
+
+    # Portada del informe
+    story.append(Paragraph("Informe del Modelo de Regresión Lineal", estilos["Title"]))
+    story.append(Paragraph(f"Generado el {datetime.now():%d/%m/%Y a las %H:%M}", estilo_centrado))
+    story.append(Spacer(1, 8))
+
+    # 1. Datos del análisis
+    story.append(Paragraph("1. Datos del análisis", estilo_seccion))
+    tipo = "Regresión lineal simple (1 variable)" if es_simple else "Regresión lineal múltiple"
+    story.append(
+        tabla(
+            [
+                ["Archivo de datos", str(nombre_datos)],
+                ["Registros", f"{len(df):,}"],
+                ["Columnas", f"{df.shape[1]}"],
+                ["Valores faltantes", f"{int(df.isna().sum().sum())}"],
+                ["Tipo de modelo", tipo],
+                ["Variable dependiente (Y)", str(target)],
+                ["Variables independientes (X)", ", ".join(features)],
+                ["Predictores del modelo", ", ".join(nombres)],
+                ["Partición de prueba", f"{test_size:.0%}"],
+                ["Semilla aleatoria", f"{random_state}"],
+            ],
+            anchos=[5.5 * cm, 11.4 * cm],
+            cabecera=False,
+        )
+    )
+
+    # 2. Ecuación del modelo
+    story.append(Paragraph("2. Ecuación del modelo", estilo_seccion))
+    intercepto = modelo.intercept_
+    eq = f"Y estimada = {intercepto:.4f}"
+    for n, c in zip(nombres, modelo.coef_):
+        signo = "+" if c >= 0 else "-"
+        eq += f" {signo} {abs(c):.4f} * {n}"
+    story.append(Paragraph(eq, estilo_codigo))
+
+    # 3. Métricas de desempeño
+    story.append(Paragraph("3. Métricas de desempeño", estilo_seccion))
+    filas = [["Métrica", "Entrenamiento", "Prueba"]]
+    for k in m_test:
+        filas.append([k, f"{m_train[k]:.4f}", f"{m_test[k]:.4f}"])
+    story.append(tabla(filas))
+
+    # 4. Coeficientes del modelo
+    story.append(Paragraph("4. Coeficientes del modelo", estilo_seccion))
+    filas = [["Variable", "Coeficiente"]]
+    for n, c in zip(nombres, modelo.coef_):
+        filas.append([n, f"{c:.6f}"])
+    story.append(tabla(filas))
+
+    # 5. Gráficos del modelo
+    story.append(Paragraph("5. Gráficos del modelo", estilo_seccion))
+    if es_simple:
+        fig = grafico_regresion_simple(X, y, nombres[0])
+        agregar_grafico(story, fig)
+    else:
+        fig = grafico_matriz_dispersion(X, y, nombres)
+        agregar_grafico(story, fig)
+    fig = grafico_actual_vs_predicho(y_test, y_pred_test)
+    agregar_grafico(story, fig)
+    fig = grafico_residuos(y_test, y_pred_test)
+    agregar_grafico(story, fig)
+    fig = grafico_coeficientes(modelo, nombres)
+    agregar_grafico(story, fig)
+
+    # 6. Predicción realizada (si existe)
+    if prediccion:
+        story.append(Paragraph("6. Predicción realizada", estilo_seccion))
+        filas = [["Variable", "Valor"]]
+        for k, v in prediccion["valores"].items():
+            filas.append([k, f"{v:,.4f}"])
+        filas.append(["Valor predicho (Y)", f"{prediccion['prediccion']:,.4f}"])
+        story.append(tabla(filas, anchos=[9 * cm, 8 * cm]))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # =========================================================================== #
@@ -440,7 +637,50 @@ with st.form("formulario_prediccion"):
 if predecir:
     fila = pd.DataFrame([valores])
     pred = float(modelo.predict(fila)[0])
+    st.session_state["ultima_prediccion"] = {"valores": dict(valores), "prediccion": pred}
     st.success(f"Valor predicho de **{target}**: **{pred:,.4f}**")
 
+
+# --------------------------------------------------------------------------- #
+# 7. Informe del modelo en PDF
+# --------------------------------------------------------------------------- #
+st.subheader("📄 Informe del modelo en PDF")
+st.markdown(
+    "Genera un informe descargable con los datos del análisis, la ecuación del "
+    "modelo, las métricas de desempeño, los coeficientes, los gráficos y, si "
+    "realizaste una predicción, el resultado de la misma."
+)
+
+if st.button("📄 Generar informe en PDF"):
+    with st.spinner("Generando el informe…"):
+        nombre_archivo = getattr(archivo, "name", None) or "Datos de ejemplo (sample_data.csv)"
+        st.session_state["pdf_reporte"] = generar_reporte_pdf(
+            nombre_datos=nombre_archivo,
+            df=df,
+            target=target,
+            features=features,
+            nombres=nombres,
+            es_simple=es_simple,
+            X=X,
+            y=y,
+            modelo=modelo,
+            y_test=y_test,
+            y_pred_test=y_pred_test,
+            m_test=m_test,
+            m_train=m_train,
+            test_size=test_size,
+            random_state=random_state,
+            prediccion=st.session_state.get("ultima_prediccion"),
+        )
+
+if "pdf_reporte" in st.session_state:
+    st.download_button(
+        "⬇️ Descargar informe en PDF",
+        data=st.session_state["pdf_reporte"],
+        file_name="informe_regresion_lineal.pdf",
+        mime="application/pdf",
+        type="primary",
+    )
+
 st.markdown("---")
-st.caption("Hecho con Streamlit, pandas, scikit-learn, matplotlib y seaborn.")
+st.caption("Hecho con Streamlit, pandas, scikit-learn, matplotlib, seaborn y reportlab.")
